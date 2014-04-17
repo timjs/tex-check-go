@@ -59,14 +59,14 @@ const (
 )
 
 func isNewLine(b byte) bool { return b == '\n' || b == '\r' }
-func isSpace(b byte) bool   { return b == ' ' || b == '\n' || b == '\t' || b == '\r' }
+func isSpace(b byte) bool   { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
 func isLetter(b byte) bool  { return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z' }
-func isActive(b byte) bool {
-	return b == '{' || b == '}' || b == '[' || b == ']' || b == '(' || b == ')' || b == '<' || b == '>' || b == '$' || b == '@'
-}
+func isDigit(b byte) bool   { return '0' <= b && b <= '9' }
 func isComment(b byte) bool { return b == '%' }
 func isEscape(b byte) bool  { return b == '\\' }
-func isSpecial(b byte) bool { return isSpace(b) || isActive(b) || isComment(b) || isEscape(b) }
+func isSpecial(b byte) bool {
+	return b == '{' || b == '}' || b == '[' || b == ']' || b == '(' || b == ')' || b == '<' || b == '>' || b == '$' || b == '@'
+}
 
 func consume(n int, data []byte) (advance int, token []byte, err error) {
 	advance, token, err = n, data[:n], nil
@@ -99,17 +99,22 @@ func consumeTill(test func(byte) bool, data []byte) (advance int, token []byte, 
 
 func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 	switch b := data[0]; {
+	case isLetter(b):
+		advance, token, err = consumeWhile(isLetter, data)
 	case isSpace(b):
 		advance, token, err = consumeWhile(isSpace, data)
-	case isComment(b):
-		advance, token, err = consumeTill(isNewLine, data)
-	case isActive(b):
+	case isDigit(b):
+		advance, token, err = consumeWhile(isDigit, data)
+	case isSpecial(b):
 		advance, token, err = consume(1, data)
 	case isEscape(b):
 		advance, token, err = consumeWhile(isLetter, data[1:])
+		token = append([]byte("\\"), token...)
 		advance++
+	case isComment(b):
+		advance, token, err = consumeTill(isNewLine, data)
 	default:
-		advance, token, err = consumeTill(isSpace, data)
+		advance, token, err = consume(1, data)
 	}
 	return
 }
@@ -130,23 +135,7 @@ func main() {
 	state := *new(State)
 	fmt.Printf("%+v %T\n", state, state)
 
-	var n int
-	var t []byte
-	r := []byte("Hello world!")
-
-	n, t, _ = consumeWhile(isLetter, r)
-	r = r[n:]
-	fmt.Printf("%d, %q, %q\n", n, t, r)
-
-	n, t, _ = consumeWhile(isSpace, r)
-	r = r[n:]
-	fmt.Printf("%d, %q, %q\n", n, t, r)
-
-	n, t, _ = consumeWhile(isLetter, r)
-	r = r[n:]
-	fmt.Printf("%d, %q, %q\n", n, t, r)
-
-	reader := strings.NewReader("This is \ta \\LaTeX \\emph{test} string, containing newlines\nand some $math$.")
+	reader := strings.NewReader("This is \ta \\LaTeX \\emph{test} string, containing newlines\nand some $math^42$. % It also includes a comment\nBy Tim~Steenvoorden.")
 	scanner := bufio.NewScanner(reader)
 	scanner.Split(splitter)
 
