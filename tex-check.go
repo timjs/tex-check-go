@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"fmt"
+	"os"
 	"strings"
 )
 
@@ -64,7 +65,7 @@ func isLetter(b byte) bool  { return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z
 func isDigit(b byte) bool   { return '0' <= b && b <= '9' }
 func isComment(b byte) bool { return b == '%' }
 func isEscape(b byte) bool  { return b == '\\' }
-func isSpecial(b byte) bool {
+func isGrouping(b byte) bool {
 	return b == '{' || b == '}' || b == '[' || b == ']' || b == '(' || b == ')' || b == '<' || b == '>' || b == '$' || b == '@'
 }
 
@@ -75,9 +76,7 @@ func consume(n int, data []byte) (advance int, token []byte, err error) {
 
 func consumeWhile(test func(byte) bool, data []byte) (advance int, token []byte, err error) {
 	for i, b := range data {
-		if test(b) {
-			continue
-		} else {
+		if !test(b) {
 			advance, token, err = i, data[:i], nil
 			break
 		}
@@ -90,8 +89,6 @@ func consumeTill(test func(byte) bool, data []byte) (advance int, token []byte, 
 		if test(b) {
 			advance, token, err = i, data[:i], nil
 			break
-		} else {
-			continue
 		}
 	}
 	return
@@ -99,13 +96,13 @@ func consumeTill(test func(byte) bool, data []byte) (advance int, token []byte, 
 
 func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 	switch b := data[0]; {
-	case isLetter(b):
-		advance, token, err = consumeWhile(isLetter, data)
 	case isSpace(b):
 		advance, token, err = consumeWhile(isSpace, data)
+	case isLetter(b):
+		advance, token, err = consumeWhile(isLetter, data)
 	case isDigit(b):
 		advance, token, err = consumeWhile(isDigit, data)
-	case isSpecial(b):
+	case isGrouping(b):
 		advance, token, err = consume(1, data)
 	case isEscape(b):
 		advance, token, err = consumeWhile(isLetter, data[1:])
@@ -131,17 +128,31 @@ func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 // 	fallthrough
 // }
 
+func lex(s *bufio.Scanner) {
+	s.Split(splitter)
+	for s.Scan() {
+		token := s.Text()
+		fmt.Printf("%q\n", token)
+	}
+
+}
+
 func main() {
 	state := *new(State)
 	fmt.Printf("%+v %T\n", state, state)
 
 	reader := strings.NewReader("This is \ta \\LaTeX \\emph{test} string, containing newlines\nand some $math^42$. % It also includes a comment\nBy Tim~Steenvoorden.")
 	scanner := bufio.NewScanner(reader)
-	scanner.Split(splitter)
+	lex(scanner)
 
-	for scanner.Scan() {
-		token := scanner.Text()
-		fmt.Printf("%q\n", token)
+	for _, a := range os.Args[1:] {
+		f, e := os.Open(a)
+		if e != nil {
+			fmt.Println(e)
+		} else {
+			s := bufio.NewScanner(f)
+			lex(s)
+		}
 	}
 
 }
