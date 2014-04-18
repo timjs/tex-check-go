@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"os"
 	"strings"
@@ -52,15 +53,19 @@ type (
 		line  Line
 		stack Stack
 	}
+	LocatedSymbol struct {
+		Symbol
+		line Line
+	}
 )
 
 const (
-	Normal Mode = iota
-	Math
+	NORMAL Mode = iota
+	MATH
 )
 
 func isNewLine(b byte) bool { return b == '\n' || b == '\r' }
-func isSpace(b byte) bool   { return b == ' ' || b == '\t' || b == '\n' || b == '\r' }
+func isSpace(b byte) bool   { return b == ' ' || b == '\t' }
 func isLetter(b byte) bool  { return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z' }
 func isDigit(b byte) bool   { return '0' <= b && b <= '9' }
 func isComment(b byte) bool { return b == '%' }
@@ -96,6 +101,8 @@ func consumeTill(test func(byte) bool, data []byte) (advance int, token []byte, 
 
 func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 	switch b := data[0]; {
+	case isNewLine(b):
+		advance, token, err = consume(1, data)
 	case isSpace(b):
 		advance, token, err = consumeWhile(isSpace, data)
 	case isLetter(b):
@@ -128,6 +135,93 @@ func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 // 	fallthrough
 // }
 
+func balanced(scanner *bufio.Scanner) bool {
+	state := new(State)
+	scanner.Split(splitter)
+
+	for scanner.Scan() {
+		token := scanner.Bytes()
+		switch b := token[0]; {
+		case isNewLine(b):
+			state.line++
+		case isEscape(b):
+			if bytes.HasPrefix(token, []byte("\\start")) {
+				name := bytes.TrimPrefix(token, []byte("\\start"))
+				push(state, StartStop(name))
+			} else if bytes.HasPrefix(token, []byte("\\stop")) {
+				name := bytes.TrimPrefix(token, []byte("\\stop"))
+				pop(state, StartStop(name))
+			} else if bytes.HasPrefix(token, []byte("\\begin")) {
+				scanner.Scan() // '{'
+				scanner.Scan() // name
+				push(state, BeginEnd(scanner.Bytes()))
+				scanner.Scan() // '{'
+			} else if bytes.HasPrefix(token, []byte("\\end")) {
+				scanner.Scan() // '{'
+				scanner.Scan() // name
+				pop(state, BeginEnd(scanner.Bytes()))
+				scanner.Scan() // '{'
+			} else if bytes.HasPrefix(token, []byte("\\left")) {
+				scanner.Scan() // delimiter
+				push(state, Delimiter(struct{}{}))
+			} else if bytes.HasPrefix(token, []byte("\\right")) {
+				scanner.Scan() // delimiter
+				pop(state, Delimiter(struct{}{}))
+			}
+		case isGrouping(b):
+			switch b {
+			case '{':
+				push(state, Brace(struct{}{}))
+			case '}':
+				pop(state, Brace(struct{}{}))
+			case '[':
+				push(state, Bracket(struct{}{}))
+			case ']':
+				pop(state, Bracket(struct{}{}))
+			case '(':
+				push(state, Paren(struct{}{}))
+			case ')':
+				pop(state, Paren(struct{}{}))
+			case '<':
+				push(state, Chevron(struct{}{}))
+			case '>':
+				pop(state, Chevron(struct{}{}))
+			case '$':
+				switch state.mode {
+				case MATH:
+					pop(state, Dollar(struct{}{}))
+					state.mode = NORMAL
+				case NORMAL:
+					push(state, Dollar(struct{}{}))
+					state.mode = MATH
+				}
+				// case '@':
+				// 	decide(state, At(struct{}{}))
+				// default: //FIXME no default case ?
+			}
+		}
+
+	}
+	return false
+}
+
+func push(state *State, symbol Symbol) {
+	fmt.Println("++ ", symbol)
+	state.stack = append(state.stack, symbol)
+}
+
+func pop(state *State, symbol Symbol) (err error) {
+	fmt.Println("-- ", symbol)
+	if len(state.stack) == 0 {
+		// err = "ClosedWithoutOpening"
+	} else if state.stack[len(state.stack)-1] == symbol {
+		state.stack = state.stack[:len(state.stack)-1]
+	} else {
+		// err = "DoesNotMatch"
+	}
+	return
+}
+
 func lex(s *bufio.Scanner) {
 	s.Split(splitter)
 	for s.Scan() {
@@ -151,8 +245,18 @@ func main() {
 			fmt.Println(e)
 		} else {
 			s := bufio.NewScanner(f)
-			lex(s)
+			// lex(s)
+			balanced(s)
 		}
 	}
 
+	var s1, s2, s3 Symbol
+	s1 = Brace(struct{}{})
+	s2 = Brace(struct{}{})
+	s3 = Paren(struct{}{})
+
+	fmt.Println(s1, s2, s3)
+	fmt.Println(s1 == s2)
+	fmt.Println(s2 == s3)
+	fmt.Println(s3 == s1)
 }
