@@ -49,9 +49,10 @@ type (
 	Line  uint
 	Stack []LocatedSymbol
 	State struct {
-		mode  Mode
-		line  Line
-		stack Stack
+		mode     Mode
+		line     Line
+		stack    Stack
+		verbatim byte
 	}
 	LocatedSymbol struct {
 		symbol Symbol
@@ -62,6 +63,7 @@ type (
 const (
 	NORMAL Mode = iota
 	MATH
+	VERBATIM
 )
 
 func isNewLine(b byte) bool { return b == '\n' || b == '\r' }
@@ -97,6 +99,21 @@ func consumeTill(test func(byte) bool, data []byte) (advance int, token []byte, 
 		}
 	}
 	return
+}
+
+func matcher(b byte) byte {
+	switch b {
+	case '{':
+		return '}'
+	case '[':
+		return ']'
+	case '(':
+		return ')'
+	case '<':
+		return '>'
+	default:
+		return b
+	}
 }
 
 func splitter(data []byte, end bool) (advance int, token []byte, err error) {
@@ -135,80 +152,104 @@ func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 
 func balanced(scanner *bufio.Scanner) bool {
 	state := new(State)
+	state.line++
 	scanner.Split(splitter)
 
 	for scanner.Scan() {
-		switch token := scanner.Bytes(); token[0] {
-		case '\n', '\r':
-			state.line++
-		case '\\':
-			switch {
-			case bytes.HasPrefix(token, []byte("\\start")):
-				name := bytes.TrimPrefix(token, []byte("\\start"))
-				push(state, StartStop(name))
-			case bytes.HasPrefix(token, []byte("\\stop")):
-				name := bytes.TrimPrefix(token, []byte("\\stop"))
-				pop(state, StartStop(name))
-			case bytes.HasPrefix(token, []byte("\\begin")):
-				scanner.Scan() // '{'
-				scanner.Scan() // name
-				push(state, BeginEnd(scanner.Bytes()))
-				scanner.Scan() // '{'
-			case bytes.HasPrefix(token, []byte("\\end")):
-				scanner.Scan() // '{'
-				scanner.Scan() // name
-				pop(state, BeginEnd(scanner.Bytes()))
-				scanner.Scan() // '{'
-			case bytes.HasPrefix(token, []byte("\\left")):
-				scanner.Scan() // delimiter
-				push(state, Delimiter{})
-			case bytes.HasPrefix(token, []byte("\\right")):
-				scanner.Scan() // delimiter
-				pop(state, Delimiter{})
+		switch state.mode {
+		case NORMAL, MATH:
+			switch token := scanner.Bytes(); token[0] {
+			case '\n', '\r':
+				state.line++
+			case '\\':
+				switch {
+				case bytes.HasPrefix(token, []byte("\\start")):
+					name := bytes.TrimPrefix(token, []byte("\\start"))
+					push(state, StartStop(name))
+				case bytes.HasPrefix(token, []byte("\\stop")):
+					name := bytes.TrimPrefix(token, []byte("\\stop"))
+					pop(state, StartStop(name))
+				case bytes.HasPrefix(token, []byte("\\begin")):
+					scanner.Scan() // '{'
+					scanner.Scan() // name
+					push(state, BeginEnd(scanner.Bytes()))
+					scanner.Scan() // '{'
+				case bytes.HasPrefix(token, []byte("\\end")):
+					scanner.Scan() // '{'
+					scanner.Scan() // name
+					pop(state, BeginEnd(scanner.Bytes()))
+					scanner.Scan() // '{'
+				case bytes.HasPrefix(token, []byte("\\left")):
+					scanner.Scan() // delimiter
+					push(state, Delimiter{})
+				case bytes.HasPrefix(token, []byte("\\right")):
+					scanner.Scan() // delimiter
+					pop(state, Delimiter{})
+				case bytes.HasPrefix(token, []byte("\\type")):
+					scanner.Scan() // delimiter
+					state.mode = VERBATIM
+					state.verbatim = matcher(scanner.Bytes()[0])
+				}
+			case '{':
+				push(state, Brace{})
+			case '}':
+				pop(state, Brace{})
+			case '[':
+				push(state, Bracket{})
+			case ']':
+				pop(state, Bracket{})
+			case '(':
+				push(state, Paren{})
+			case ')':
+				pop(state, Paren{})
+			case '<':
+				push(state, Chevron{})
+			case '>':
+				pop(state, Chevron{})
+			case '$':
+				switch state.mode {
+				case MATH:
+					pop(state, Dollar{})
+					state.mode = NORMAL
+				case NORMAL:
+					push(state, Dollar{})
+					state.mode = MATH
+				}
+				// case '@':
+				// 	decide(state, At(struct{}{}))
 			}
-		case '{':
-			push(state, Brace{})
-		case '}':
-			pop(state, Brace{})
-		case '[':
-			push(state, Bracket{})
-		case ']':
-			pop(state, Bracket{})
-		case '(':
-			push(state, Paren{})
-		case ')':
-			pop(state, Paren{})
-		case '<':
-			push(state, Chevron{})
-		case '>':
-			pop(state, Chevron{})
-		case '$':
-			switch state.mode {
-			case MATH:
-				pop(state, Dollar{})
+		case VERBATIM:
+			if scanner.Bytes()[0] == state.verbatim {
 				state.mode = NORMAL
-			case NORMAL:
-				push(state, Dollar{})
-				state.mode = MATH
 			}
-			// case '@':
-			// 	decide(state, At(struct{}{}))
 		}
+	}
+	if len(state.stack) != 0 {
+		last := state.stack[len(state.stack)-1]
+		fmt.Printf("!! Unexpected end of file, expected %q\n   (to close %q from line %d)\n",
+			last.symbol.closing(), last.symbol.opening(), last.line)
 	}
 	return true
 }
 
 func push(state *State, symbol Symbol) {
+	fmt.Printf("++ %v %T\n", symbol, symbol)
 	state.stack = append(state.stack, LocatedSymbol{symbol, state.line})
 }
 
 func pop(state *State, symbol Symbol) (err error) {
+	fmt.Printf("-- %v %T\n", symbol, symbol)
 	if len(state.stack) == 0 {
-		// err = "ClosedWithoutOpening"
-	} else if state.stack[len(state.stack)-1].symbol == symbol {
-		state.stack = state.stack[:len(state.stack)-1]
+		fmt.Printf("!! Line %d:\n   Unexpected %q, closed without opening\n",
+			state.line, symbol.closing())
 	} else {
-		// err = "DoesNotMatch"
+		last := state.stack[len(state.stack)-1]
+		if symbol == last.symbol {
+			state.stack = state.stack[:len(state.stack)-1]
+		} else {
+			fmt.Printf("!! Line %d:\n   Unexpected %q, expected %q\n   (to close %q from line %d)\n",
+				state.line, symbol.closing(), last.symbol.closing(), last.symbol.opening(), last.line)
+		}
 	}
 	return
 }
@@ -241,14 +282,4 @@ func main() {
 		}
 	}
 
-	var s1, s2, s3 Symbol
-	s1 = Brace(struct{}{})
-	s2 = Brace{}
-	s3 = Paren(struct{}{})
-	s4 := LocatedSymbol{Paren(struct{}{}), 12}
-
-	fmt.Println(s1, s2, s3, s4)
-	fmt.Println(s1 == s2)
-	fmt.Println(s2 == s3)
-	fmt.Println(s4.symbol == s3)
 }
