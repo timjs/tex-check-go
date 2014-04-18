@@ -47,15 +47,15 @@ func (s BeginEnd) closing() string  { return "\\end{" + string(s) + "}" }
 type (
 	Mode  uint
 	Line  uint
-	Stack []Symbol
+	Stack []LocatedSymbol
 	State struct {
 		mode  Mode
 		line  Line
 		stack Stack
 	}
 	LocatedSymbol struct {
-		Symbol
-		line Line
+		symbol Symbol
+		line   Line
 	}
 )
 
@@ -68,8 +68,8 @@ func isNewLine(b byte) bool { return b == '\n' || b == '\r' }
 func isSpace(b byte) bool   { return b == ' ' || b == '\t' }
 func isLetter(b byte) bool  { return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z' }
 func isDigit(b byte) bool   { return '0' <= b && b <= '9' }
-func isComment(b byte) bool { return b == '%' }
 func isEscape(b byte) bool  { return b == '\\' }
+func isComment(b byte) bool { return b == '%' }
 func isGrouping(b byte) bool {
 	return b == '{' || b == '}' || b == '[' || b == ']' || b == '(' || b == ')' || b == '<' || b == '>' || b == '$' || b == '@'
 }
@@ -109,8 +109,6 @@ func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 		advance, token, err = consumeWhile(isLetter, data)
 	case isDigit(b):
 		advance, token, err = consumeWhile(isDigit, data)
-	case isGrouping(b):
-		advance, token, err = consume(1, data)
 	case isEscape(b):
 		advance, token, err = consumeWhile(isLetter, data[1:])
 		token = append([]byte("\\"), token...)
@@ -140,81 +138,74 @@ func balanced(scanner *bufio.Scanner) bool {
 	scanner.Split(splitter)
 
 	for scanner.Scan() {
-		token := scanner.Bytes()
-		switch b := token[0]; {
-		case isNewLine(b):
+		switch token := scanner.Bytes(); token[0] {
+		case '\n', '\r':
 			state.line++
-		case isEscape(b):
-			if bytes.HasPrefix(token, []byte("\\start")) {
+		case '\\':
+			switch {
+			case bytes.HasPrefix(token, []byte("\\start")):
 				name := bytes.TrimPrefix(token, []byte("\\start"))
 				push(state, StartStop(name))
-			} else if bytes.HasPrefix(token, []byte("\\stop")) {
+			case bytes.HasPrefix(token, []byte("\\stop")):
 				name := bytes.TrimPrefix(token, []byte("\\stop"))
 				pop(state, StartStop(name))
-			} else if bytes.HasPrefix(token, []byte("\\begin")) {
+			case bytes.HasPrefix(token, []byte("\\begin")):
 				scanner.Scan() // '{'
 				scanner.Scan() // name
 				push(state, BeginEnd(scanner.Bytes()))
 				scanner.Scan() // '{'
-			} else if bytes.HasPrefix(token, []byte("\\end")) {
+			case bytes.HasPrefix(token, []byte("\\end")):
 				scanner.Scan() // '{'
 				scanner.Scan() // name
 				pop(state, BeginEnd(scanner.Bytes()))
 				scanner.Scan() // '{'
-			} else if bytes.HasPrefix(token, []byte("\\left")) {
+			case bytes.HasPrefix(token, []byte("\\left")):
 				scanner.Scan() // delimiter
-				push(state, Delimiter(struct{}{}))
-			} else if bytes.HasPrefix(token, []byte("\\right")) {
+				push(state, Delimiter{})
+			case bytes.HasPrefix(token, []byte("\\right")):
 				scanner.Scan() // delimiter
-				pop(state, Delimiter(struct{}{}))
+				pop(state, Delimiter{})
 			}
-		case isGrouping(b):
-			switch b {
-			case '{':
-				push(state, Brace(struct{}{}))
-			case '}':
-				pop(state, Brace(struct{}{}))
-			case '[':
-				push(state, Bracket(struct{}{}))
-			case ']':
-				pop(state, Bracket(struct{}{}))
-			case '(':
-				push(state, Paren(struct{}{}))
-			case ')':
-				pop(state, Paren(struct{}{}))
-			case '<':
-				push(state, Chevron(struct{}{}))
-			case '>':
-				pop(state, Chevron(struct{}{}))
-			case '$':
-				switch state.mode {
-				case MATH:
-					pop(state, Dollar(struct{}{}))
-					state.mode = NORMAL
-				case NORMAL:
-					push(state, Dollar(struct{}{}))
-					state.mode = MATH
-				}
-				// case '@':
-				// 	decide(state, At(struct{}{}))
-				// default: //FIXME no default case ?
+		case '{':
+			push(state, Brace{})
+		case '}':
+			pop(state, Brace{})
+		case '[':
+			push(state, Bracket{})
+		case ']':
+			pop(state, Bracket{})
+		case '(':
+			push(state, Paren{})
+		case ')':
+			pop(state, Paren{})
+		case '<':
+			push(state, Chevron{})
+		case '>':
+			pop(state, Chevron{})
+		case '$':
+			switch state.mode {
+			case MATH:
+				pop(state, Dollar{})
+				state.mode = NORMAL
+			case NORMAL:
+				push(state, Dollar{})
+				state.mode = MATH
 			}
+			// case '@':
+			// 	decide(state, At(struct{}{}))
 		}
-
 	}
-	return false
+	return true
 }
 
 func push(state *State, symbol Symbol) {
-	fmt.Println("++ ", symbol)
-	state.stack = append(state.stack, symbol)
+	state.stack = append(state.stack, LocatedSymbol{symbol, state.line})
 }
 
 func pop(state *State, symbol Symbol) (err error) {
-	fmt.Println("-- ", symbol)
 	if len(state.stack) == 0 {
 		// err = "ClosedWithoutOpening"
-	} else if state.stack[len(state.stack)-1] == symbol {
+	} else if state.stack[len(state.stack)-1].symbol == symbol {
 		state.stack = state.stack[:len(state.stack)-1]
 	} else {
 		// err = "DoesNotMatch"
@@ -237,7 +228,7 @@ func main() {
 
 	reader := strings.NewReader("This is \ta \\LaTeX \\emph{test} string, containing newlines\nand some $math^42$. % It also includes a comment\nBy Tim~Steenvoorden.")
 	scanner := bufio.NewScanner(reader)
-	lex(scanner)
+	balanced(scanner)
 
 	for _, a := range os.Args[1:] {
 		f, e := os.Open(a)
@@ -252,11 +243,12 @@ func main() {
 
 	var s1, s2, s3 Symbol
 	s1 = Brace(struct{}{})
-	s2 = Brace(struct{}{})
+	s2 = Brace{}
 	s3 = Paren(struct{}{})
+	s4 := LocatedSymbol{Paren(struct{}{}), 12}
 
-	fmt.Println(s1, s2, s3)
+	fmt.Println(s1, s2, s3, s4)
 	fmt.Println(s1 == s2)
 	fmt.Println(s2 == s3)
-	fmt.Println(s3 == s1)
+	fmt.Println(s4.symbol == s3)
 }
