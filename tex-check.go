@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"fmt"
 	"os"
-	"strings"
 )
 
 type (
@@ -20,6 +19,7 @@ type (
 	Dollar    struct{}
 	At        struct{}
 	Delimiter struct{}
+	Other     byte
 	StartStop string
 	BeginEnd  string
 )
@@ -31,6 +31,7 @@ func (_ Chevron) opening() string   { return "<" }
 func (_ Dollar) opening() string    { return "$" }
 func (_ At) opening() string        { return "@" }
 func (_ Delimiter) opening() string { return "\\left" }
+func (b Other) opening() string     { return string(b) }
 func (s StartStop) opening() string { return "\\start" + string(s) }
 func (s BeginEnd) opening() string  { return "\\begin{" + string(s) + "}" }
 
@@ -41,6 +42,7 @@ func (_ Chevron) closing() string   { return ">" }
 func (_ Dollar) closing() string    { return "$" }
 func (_ At) closing() string        { return "@" }
 func (_ Delimiter) closing() string { return "\\right" }
+func (b Other) closing() string     { return string(b) }
 func (s StartStop) closing() string { return "\\stop" + string(s) }
 func (s BeginEnd) closing() string  { return "\\end{" + string(s) + "}" }
 
@@ -49,10 +51,9 @@ type (
 	Line  uint
 	Stack []LocatedSymbol
 	State struct {
-		mode     Mode
-		line     Line
-		stack    Stack
-		verbatim byte
+		mode  Mode
+		line  Line
+		stack Stack
 	}
 	LocatedSymbol struct {
 		symbol Symbol
@@ -67,7 +68,7 @@ const (
 )
 
 func isNewLine(b byte) bool { return b == '\n' || b == '\r' }
-func isSpace(b byte) bool   { return b == ' ' || b == '\t' }
+func isSpace(b byte) bool   { return b == ' ' || b == '\t' || b == '\v' || b == '\f' }
 func isLetter(b byte) bool  { return 'A' <= b && b <= 'Z' || 'a' <= b && b <= 'z' }
 func isDigit(b byte) bool   { return '0' <= b && b <= '9' }
 func isEscape(b byte) bool  { return b == '\\' }
@@ -81,16 +82,6 @@ func consume(n int, data []byte) (advance int, token []byte, err error) {
 	return
 }
 
-func consumeWhile(test func(byte) bool, data []byte) (advance int, token []byte, err error) {
-	for i, b := range data {
-		if !test(b) {
-			advance, token, err = i, data[:i], nil
-			break
-		}
-	}
-	return
-}
-
 func consumeTill(test func(byte) bool, data []byte) (advance int, token []byte, err error) {
 	for i, b := range data {
 		if test(b) {
@@ -101,18 +92,28 @@ func consumeTill(test func(byte) bool, data []byte) (advance int, token []byte, 
 	return
 }
 
-func matcher(b byte) byte {
+func consumeWhile(test func(byte) bool, data []byte) (advance int, token []byte, err error) {
+	for i, b := range data {
+		if !test(b) {
+			advance, token, err = i, data[:i], nil
+			break
+		}
+	}
+	return
+}
+
+func symbolise(b byte) Symbol {
 	switch b {
-	case '{':
-		return '}'
-	case '[':
-		return ']'
-	case '(':
-		return ')'
-	case '<':
-		return '>'
+	case '{', '}':
+		return Brace{}
+	case '[', ']':
+		return Bracket{}
+	case '(', ')':
+		return Paren{}
+	case '<', '>':
+		return Chevron{}
 	default:
-		return b
+		return Other(b)
 	}
 }
 
@@ -128,7 +129,7 @@ func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 		advance, token, err = consumeWhile(isDigit, data)
 	case isEscape(b):
 		advance, token, err = consumeWhile(isLetter, data[1:])
-		token = append([]byte("\\"), token...)
+		token = append([]byte{'\\'}, token...)
 		advance++
 	case isComment(b):
 		advance, token, err = consumeTill(isNewLine, data)
@@ -138,19 +139,8 @@ func splitter(data []byte, end bool) (advance int, token []byte, err error) {
 	return
 }
 
-// if bytes.HasPrefix(data[1:], []byte("start")) {
-// 	advance, token, err = consumeLetters(data[1:])
-// 	//FIXME advance++
-// } else if strings.HasPrefix(data[1:], "begin") {
-// 	advance, token, err = consumeLetters(data[5:])
-// 	advance++
-// } else if strings.HasPrefix(data[1:], "left") {
-// 	advance, token, err = consumeCommand(data)
-// } else {
-// 	fallthrough
-// }
-
 func balanced(scanner *bufio.Scanner) bool {
+	// state := State{mode: NORMAL, line:  1, stack: *new(Stack)}
 	state := new(State)
 	state.line++
 	scanner.Split(splitter)
@@ -163,87 +153,91 @@ func balanced(scanner *bufio.Scanner) bool {
 				state.line++
 			case '\\':
 				switch {
+				case bytes.Equal(token, []byte("\\starttyping")):
+					state.push(StartStop("typing"))
+					state.mode = VERBATIM
+				case bytes.Equal(token, []byte("\\type")):
+					scanner.Scan() // delimiter
+					state.push(symbolise(scanner.Bytes()[0]))
+					state.mode = VERBATIM
 				case bytes.HasPrefix(token, []byte("\\start")):
 					name := bytes.TrimPrefix(token, []byte("\\start"))
-					push(state, StartStop(name))
+					state.push(StartStop(name))
 				case bytes.HasPrefix(token, []byte("\\stop")):
 					name := bytes.TrimPrefix(token, []byte("\\stop"))
-					pop(state, StartStop(name))
-				case bytes.HasPrefix(token, []byte("\\begin")):
+					state.pop(StartStop(name))
+				case bytes.Equal(token, []byte("\\begin")):
 					scanner.Scan() // '{'
 					scanner.Scan() // name
-					push(state, BeginEnd(scanner.Bytes()))
+					state.push(BeginEnd(scanner.Bytes()))
 					scanner.Scan() // '{'
-				case bytes.HasPrefix(token, []byte("\\end")):
+				case bytes.Equal(token, []byte("\\end")):
 					scanner.Scan() // '{'
 					scanner.Scan() // name
-					pop(state, BeginEnd(scanner.Bytes()))
+					state.pop(BeginEnd(scanner.Bytes()))
 					scanner.Scan() // '{'
-				case bytes.HasPrefix(token, []byte("\\left")):
+				case bytes.Equal(token, []byte("\\left")):
 					scanner.Scan() // delimiter
-					push(state, Delimiter{})
-				case bytes.HasPrefix(token, []byte("\\right")):
+					state.push(Delimiter{})
+				case bytes.Equal(token, []byte("\\right")):
 					scanner.Scan() // delimiter
-					pop(state, Delimiter{})
-				case bytes.HasPrefix(token, []byte("\\type")):
-					scanner.Scan() // delimiter
-					state.mode = VERBATIM
-					state.verbatim = matcher(scanner.Bytes()[0])
+					state.pop(Delimiter{})
 				}
 			case '{':
-				push(state, Brace{})
+				state.push(Brace{})
 			case '}':
-				pop(state, Brace{})
+				state.pop(Brace{})
 			case '[':
-				push(state, Bracket{})
+				state.push(Bracket{})
 			case ']':
-				pop(state, Bracket{})
+				state.pop(Bracket{})
 			case '(':
-				push(state, Paren{})
+				state.push(Paren{})
 			case ')':
-				pop(state, Paren{})
-			case '<':
-				push(state, Chevron{})
-			case '>':
-				pop(state, Chevron{})
+				state.pop(Paren{})
 			case '$':
 				switch state.mode {
 				case MATH:
-					pop(state, Dollar{})
+					state.pop(Dollar{})
 					state.mode = NORMAL
 				case NORMAL:
-					push(state, Dollar{})
+					state.push(Dollar{})
 					state.mode = MATH
 				}
-				// case '@':
-				// 	decide(state, At(struct{}{}))
+			case '@':
+				state.push(At{})
+				state.mode = VERBATIM
 			}
 		case VERBATIM:
-			if scanner.Bytes()[0] == state.verbatim {
+			last := state.peak()
+			if scanner.Text() == last.symbol.closing() {
 				state.mode = NORMAL
+				state.pop(last.symbol)
 			}
 		}
 	}
 	if len(state.stack) != 0 {
-		last := state.stack[len(state.stack)-1]
+		last := state.peak()
 		fmt.Printf("!! Unexpected end of file, expected %q\n   (to close %q from line %d)\n",
 			last.symbol.closing(), last.symbol.opening(), last.line)
+		return false
+	} else {
+		return true
 	}
-	return true
 }
 
-func push(state *State, symbol Symbol) {
-	fmt.Printf("++ %v %T\n", symbol, symbol)
+func (state *State) push(symbol Symbol) {
+	// fmt.Printf("++ %v %T\n", symbol, symbol)
 	state.stack = append(state.stack, LocatedSymbol{symbol, state.line})
 }
 
-func pop(state *State, symbol Symbol) (err error) {
-	fmt.Printf("-- %v %T\n", symbol, symbol)
+func (state *State) pop(symbol Symbol) {
+	// fmt.Printf("-- %v %T\n", symbol, symbol)
 	if len(state.stack) == 0 {
 		fmt.Printf("!! Line %d:\n   Unexpected %q, closed without opening\n",
 			state.line, symbol.closing())
 	} else {
-		last := state.stack[len(state.stack)-1]
+		last := state.peak()
 		if symbol == last.symbol {
 			state.stack = state.stack[:len(state.stack)-1]
 		} else {
@@ -251,7 +245,10 @@ func pop(state *State, symbol Symbol) (err error) {
 				state.line, symbol.closing(), last.symbol.closing(), last.symbol.opening(), last.line)
 		}
 	}
-	return
+}
+
+func (state *State) peak() LocatedSymbol {
+	return state.stack[len(state.stack)-1]
 }
 
 func lex(s *bufio.Scanner) {
@@ -264,12 +261,10 @@ func lex(s *bufio.Scanner) {
 }
 
 func main() {
-	state := *new(State)
-	fmt.Printf("%+v %T\n", state, state)
 
-	reader := strings.NewReader("This is \ta \\LaTeX \\emph{test} string, containing newlines\nand some $math^42$. % It also includes a comment\nBy Tim~Steenvoorden.")
-	scanner := bufio.NewScanner(reader)
-	balanced(scanner)
+	// reader := strings.NewReader("This is \ta \\LaTeX \\emph{test} string, containing newlines\nand some $math^42$. % It also includes a comment\nBy Tim~Steenvoorden.")
+	// scanner := bufio.NewScanner(reader)
+	// balanced(scanner)
 
 	for _, a := range os.Args[1:] {
 		f, e := os.Open(a)
