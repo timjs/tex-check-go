@@ -257,7 +257,6 @@ func lex(s *bufio.Scanner) {
 		token := s.Text()
 		fmt.Printf("%q\n", token)
 	}
-
 }
 
 func main() {
@@ -273,6 +272,7 @@ func main() {
 		} else {
 			s := bufio.NewScanner(f)
 			// lex(s)
+			fmt.Printf(">> %s...\n", a)
 			balanced(s)
 		}
 	}
